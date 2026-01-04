@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>XRPL Helper (Numbers + Submit)</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 18px; }
+    input, textarea, button { width: 100%; padding: 10px; margin: 8px 0; font-size: 16px; }
+    .box { border: 1px solid #ddd; border-radius: 10px; padding: 12px; margin: 12px 0; }
+    .big { font-size: 22px; font-weight: 700; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; }
+  </style>
+</head>
+<body>
+<h2>XRPL Helper (Opción A)</h2>
+
+<div class="box">
+  <div class="big">1) Obtener números (Sequence / Fee / LLS)</div>
+  <label>RPC URL (CORS OK)</label>
+  <input id="rpc" value="https://xrplcluster.com/" />
+  <label>Account (r...)</label>
+  <input id="acct" placeholder="r..." />
+  <label>LLS delta (recomendado 30)</label>
+  <input id="delta" value="30" />
+  <button id="btnNumbers">Obtener números</button>
+
+  <div id="outNumbers" class="box" style="display:none;">
+    <div class="big">TECLEA ESTO EN LA COLDWALLET</div>
+    <div>SEQUENCE: <span id="seq" class="big"></span></div>
+    <div>FEE_DROPS: <span id="fee" class="big"></span></div>
+    <div>LEDGER_CURRENT: <span id="ledger" class="big"></span></div>
+    <div>LAST_LEDGER_SEQUENCE: <span id="lls" class="big"></span></div>
+    <div style="margin-top:8px;">RPC usado: <span id="rpcUsed" class="mono"></span></div>
+  </div>
+</div>
+
+<div class="box">
+  <div class="big">2) Submit tx_blob (TX_BLOB_HEX firmado offline)</div>
+  <label>TX_BLOB_HEX</label>
+  <textarea id="blob" rows="6" class="mono" placeholder="Pega aquí el TX_BLOB_HEX..."></textarea>
+  <button id="btnSubmit">Submit</button>
+  <div id="outSubmit" class="box" style="display:none;">
+    <div class="big">Resultado</div>
+    <pre id="submitJson" class="mono"></pre>
+  </div>
+</div>
+
+<script>
+  function getHashParams() {
+    const h = (location.hash || "").replace(/^#/, "");
+    const p = new URLSearchParams(h);
+    return Object.fromEntries(p.entries());
+  }
+
+  async function rpcCall(rpcUrl, method, params) {
+    const res = await fetch(rpcUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ method, params })
+    });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    return await res.json();
+  }
+
+  // Autollenado desde QR (hash fragment)
+  const hp = getHashParams();
+  if (hp.rpc) document.getElementById("rpc").value = hp.rpc;
+  if (hp.account) document.getElementById("acct").value = hp.account;
+  if (hp.delta) document.getElementById("delta").value = hp.delta;
+
+  document.getElementById("btnNumbers").onclick = async () => {
+    const rpc = document.getElementById("rpc").value.trim();
+    const account = document.getElementById("acct").value.trim();
+    const delta = parseInt(document.getElementById("delta").value.trim(), 10);
+
+    if (!account.startsWith("r")) return alert("Account inválida");
+    if (!Number.isFinite(delta) || delta < 5 || delta > 500) return alert("delta inválido");
+
+    try {
+      const ai = await rpcCall(rpc, "account_info", [{ account, ledger_index:"current", strict:true }]);
+      const seq = ai.result.account_data.Sequence;
+
+      const fee = await rpcCall(rpc, "fee", [{}]);
+      const feeDrops = fee.result.drops.open_ledger_fee;
+
+      const lc = await rpcCall(rpc, "ledger_current", [{}]);
+      const ledger = lc.result.ledger_current_index;
+
+      const lls = ledger + delta;
+
+      document.getElementById("seq").textContent = String(seq);
+      document.getElementById("fee").textContent = String(feeDrops);
+      document.getElementById("ledger").textContent = String(ledger);
+      document.getElementById("lls").textContent = String(lls);
+      document.getElementById("rpcUsed").textContent = rpc;
+      document.getElementById("outNumbers").style.display = "block";
+    } catch (e) {
+      alert("Error RPC: " + e.message + "\n(Nota: si el RPC no permite CORS, el navegador lo bloqueará)");
+    }
+  };
+
+  document.getElementById("btnSubmit").onclick = async () => {
+    const rpc = document.getElementById("rpc").value.trim();
+    const tx_blob = document.getElementById("blob").value.trim().replace(/^TX_BLOB_HEX=/i,"").trim();
+    if (!/^[0-9A-Fa-f]+$/.test(tx_blob) || tx_blob.length < 50) return alert("TX_BLOB_HEX inválido");
+
+    try {
+      const sub = await rpcCall(rpc, "submit", [{ tx_blob }]);
+      document.getElementById("submitJson").textContent = JSON.stringify(sub, null, 2);
+      document.getElementById("outSubmit").style.display = "block";
+    } catch (e) {
+      alert("Error submit: " + e.message);
+    }
+  };
+</script>
+</body>
+</html>
+
