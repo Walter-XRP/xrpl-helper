@@ -68,7 +68,9 @@
   if (hp.rpc) document.getElementById("rpc").value = hp.rpc;
   if (hp.account) document.getElementById("acct").value = hp.account;
   if (hp.delta) document.getElementById("delta").value = hp.delta;
+  if (hp.tx_blob) {document.getElementById("blob").value = hp.tx_blob;}
 
+  
   document.getElementById("btnNumbers").onclick = async () => {
     const rpc = document.getElementById("rpc").value.trim();
     const account = document.getElementById("acct").value.trim();
