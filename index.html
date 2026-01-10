@@ -13,12 +13,12 @@
   </style>
 </head>
 <body>
-<h2>XRPL Helper (Opción A)</h2>
+<h2>XRPL Helper (TESTNET)</h2>
 
 <div class="box">
   <div class="big">1) Obtener números (Sequence / Fee / LLS)</div>
   <label>RPC URL (CORS OK)</label>
-  <input id="rpc" value="https://xrplcluster.com/" />
+  <input id="rpc" value="https://s.altnet.rippletest.net:51234/" />
   <label>Account (r...)</label>
   <input id="acct" placeholder="r..." />
   <label>LLS delta (recomendado 30)</label>
@@ -81,7 +81,20 @@
 
     try {
       const ai = await rpcCall(rpc, "account_info", [{ account, ledger_index:"current", strict:true }]);
-      const seq = ai.result.account_data.Sequence;
+
+if (!ai || !ai.result) throw new Error("Respuesta inválida de account_info");
+
+if (ai.result.error) {
+  // típico cuando la cuenta no existe aún: actNotFound
+  throw new Error("account_info error: " + ai.result.error + " (¿cuenta no activada?)");
+}
+
+if (!ai.result.account_data || typeof ai.result.account_data.Sequence === "undefined") {
+  throw new Error("account_info no devolvió account_data.Sequence (¿cuenta no activada?)");
+}
+
+const seq = ai.result.account_data.Sequence;
+
 
       const fee = await rpcCall(rpc, "fee", [{}]);
       const feeDrops = fee.result.drops.open_ledger_fee;
