@@ -3,26 +3,34 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>XRPL Helper (Numbers + Submit)</title>
+  <title>XRPL Helper (TESTNET)</title>
   <style>
     body { font-family: system-ui, sans-serif; margin: 18px; }
     input, textarea, button { width: 100%; padding: 10px; margin: 8px 0; font-size: 16px; }
     .box { border: 1px solid #ddd; border-radius: 10px; padding: 12px; margin: 12px 0; }
     .big { font-size: 22px; font-weight: 700; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; }
+    .muted { color: #666; font-size: 14px; }
   </style>
 </head>
 <body>
 <h2>XRPL Helper (TESTNET)</h2>
+<div class="muted">
+  Este helper NO firma. Solo consulta números (Sequence/Fee/LLS) y hace submit de tx_blob firmado offline.
+</div>
 
 <div class="box">
   <div class="big">1) Obtener números (Sequence / Fee / LLS)</div>
-  <label>RPC URL (CORS OK)</label>
+
+  <label>RPC URL (si falla por CORS, se intentará fallback)</label>
   <input id="rpc" value="https://testnet.xrpl-labs.com/" />
+
   <label>Account (r...)</label>
   <input id="acct" placeholder="r..." />
+
   <label>LLS delta (recomendado 30)</label>
   <input id="delta" value="30" />
+
   <button id="btnNumbers">Obtener números</button>
 
   <div id="outNumbers" class="box" style="display:none;">
@@ -53,54 +61,93 @@
     return Object.fromEntries(p.entries());
   }
 
-  async function rpcCall(rpcUrl, method, params) {
-    const res = await fetch(rpcUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ method, params })
-    });
-    if (!res.ok) throw new Error("HTTP " + res.status);
-    return await res.json();
+  function isClassicAddress(a) {
+    // Validación simple (no perfecta), suficiente para UX.
+    return /^r[1-9A-HJ-NP-Za-km-z]{24,34}$/.test(a);
+  }
+
+  async function rpcCall(rpcUrl, method, params, timeoutMs = 8000) {
+    const controller = new AbortController();
+    const t = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const res = await fetch(rpcUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ method, params }),
+        signal: controller.signal
+      });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      return await res.json();
+    } finally {
+      clearTimeout(t);
+    }
+  }
+
+  // RPCs de fallback (TESTNET). El primero suele funcionar bien en navegador.
+  const FALLBACK_RPCS = [
+    "https://testnet.xrpl-labs.com/",
+    "https://s.altnet.rippletest.net:51234/"
+  ];
+
+  async function tryRpcList(method, params, preferredRpc) {
+    const list = [];
+    if (preferredRpc) list.push(preferredRpc);
+    for (const r of FALLBACK_RPCS) if (!list.includes(r)) list.push(r);
+
+    let lastErr = null;
+    for (const rpc of list) {
+      try {
+        const j = await rpcCall(rpc, method, params);
+        return { rpc, json: j };
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+    throw lastErr || new Error("No RPC available");
   }
 
   // Autollenado desde QR (hash fragment)
   const hp = getHashParams();
-  if (hp.rpc) document.getElementById("rpc").value = hp.rpc;
-  if (hp.account) document.getElementById("acct").value = hp.account;
-  if (hp.delta) document.getElementById("delta").value = hp.delta;
-  if (hp.tx_blob) {document.getElementById("blob").value = hp.tx_blob;}
+  if (hp.rpc) document.getElementById("rpc").value = hp.rpc.trim();
+  if (hp.account) document.getElementById("acct").value = hp.account.trim();
+  if (hp.delta) document.getElementById("delta").value = hp.delta.trim();
+  if (hp.tx_blob) document.getElementById("blob").value = hp.tx_blob.trim();
 
-  
   document.getElementById("btnNumbers").onclick = async () => {
-    const rpc = document.getElementById("rpc").value.trim();
+    const rpcPreferred = document.getElementById("rpc").value.trim();
     const account = document.getElementById("acct").value.trim();
     const delta = parseInt(document.getElementById("delta").value.trim(), 10);
 
-    if (!account.startsWith("r")) return alert("Account inválida");
+    if (!isClassicAddress(account)) return alert("Account inválida (debe ser r... válida).");
     if (!Number.isFinite(delta) || delta < 5 || delta > 500) return alert("delta inválido");
 
     try {
-      const ai = await rpcCall(rpc, "account_info", [{ account, ledger_index:"current", strict:true }]);
+      // account_info (Sequence)
+      const ai = await tryRpcList("account_info", [{ account, ledger_index:"current", strict:true }], rpcPreferred);
 
-if (!ai || !ai.result) throw new Error("Respuesta inválida de account_info");
+      if (!ai.json || !ai.json.result) throw new Error("Respuesta inválida de account_info");
 
-if (ai.result.error) {
-  // típico cuando la cuenta no existe aún: actNotFound
-  throw new Error("account_info error: " + ai.result.error + " (¿cuenta no activada?)");
-}
+      if (ai.json.result.error) {
+        // actNotFound = cuenta no activada (sin funding)
+        throw new Error("account_info error: " + ai.json.result.error + " (¿cuenta no activada en testnet?)");
+      }
 
-if (!ai.result.account_data || typeof ai.result.account_data.Sequence === "undefined") {
-  throw new Error("account_info no devolvió account_data.Sequence (¿cuenta no activada?)");
-}
+      const ad = ai.json.result.account_data;
+      if (!ad || typeof ad.Sequence === "undefined") {
+        throw new Error("account_info no devolvió Sequence (¿cuenta no activada?)");
+      }
+      const seq = ad.Sequence;
 
-const seq = ai.result.account_data.Sequence;
+      // fee (drops)
+      const fee = await tryRpcList("fee", [{}], ai.rpc);
+      const feeDrops = fee.json?.result?.drops?.open_ledger_fee;
+      if (typeof feeDrops === "undefined") throw new Error("fee: no devolvió drops.open_ledger_fee");
 
-
-      const fee = await rpcCall(rpc, "fee", [{}]);
-      const feeDrops = fee.result.drops.open_ledger_fee;
-
-      const lc = await rpcCall(rpc, "ledger_current", [{}]);
-      const ledger = lc.result.ledger_current_index;
+      // ledger_current
+      const lc = await tryRpcList("ledger_current", [{}], ai.rpc);
+      const ledger = lc.json?.result?.ledger_current_index;
+      if (typeof ledger === "undefined") throw new Error("ledger_current: no devolvió ledger_current_index");
 
       const lls = ledger + delta;
 
@@ -108,27 +155,52 @@ const seq = ai.result.account_data.Sequence;
       document.getElementById("fee").textContent = String(feeDrops);
       document.getElementById("ledger").textContent = String(ledger);
       document.getElementById("lls").textContent = String(lls);
-      document.getElementById("rpcUsed").textContent = rpc;
+      document.getElementById("rpcUsed").textContent = ai.rpc;
       document.getElementById("outNumbers").style.display = "block";
+
     } catch (e) {
-      alert("Error RPC: " + e.message + "\n(Nota: si el RPC no permite CORS, el navegador lo bloqueará)");
+      const msg = (e && e.message) ? e.message : String(e);
+
+      // Mensaje más útil para CORS / fetch bloqueado
+      if (/NetworkError|Failed to fetch|fetch/i.test(msg)) {
+        alert(
+          "Error RPC (posible CORS o endpoint caído).\n" +
+          "Prueba con el RPC: https://testnet.xrpl-labs.com/\n\n" +
+          "Detalle: " + msg
+        );
+        return;
+      }
+
+      alert("Error RPC: " + msg);
     }
   };
 
   document.getElementById("btnSubmit").onclick = async () => {
-    const rpc = document.getElementById("rpc").value.trim();
+    const rpcPreferred = document.getElementById("rpc").value.trim();
     const tx_blob = document.getElementById("blob").value.trim().replace(/^TX_BLOB_HEX=/i,"").trim();
-    if (!/^[0-9A-Fa-f]+$/.test(tx_blob) || tx_blob.length < 50) return alert("TX_BLOB_HEX inválido");
+
+    if (!/^[0-9A-Fa-f]+$/.test(tx_blob) || tx_blob.length < 50) {
+      return alert("TX_BLOB_HEX inválido");
+    }
 
     try {
-      const sub = await rpcCall(rpc, "submit", [{ tx_blob }]);
-      document.getElementById("submitJson").textContent = JSON.stringify(sub, null, 2);
+      const sub = await tryRpcList("submit", [{ tx_blob }], rpcPreferred);
+      document.getElementById("submitJson").textContent = JSON.stringify(sub.json, null, 2);
       document.getElementById("outSubmit").style.display = "block";
+      document.getElementById("rpcUsed").textContent = sub.rpc;
     } catch (e) {
-      alert("Error submit: " + e.message);
+      const msg = (e && e.message) ? e.message : String(e);
+      if (/NetworkError|Failed to fetch|fetch/i.test(msg)) {
+        alert(
+          "Error submit (posible CORS o endpoint caído).\n" +
+          "Prueba con el RPC: https://testnet.xrpl-labs.com/\n\n" +
+          "Detalle: " + msg
+        );
+        return;
+      }
+      alert("Error submit: " + msg);
     }
   };
 </script>
 </body>
 </html>
-
